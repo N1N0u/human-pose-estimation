@@ -1,10 +1,8 @@
-import argparse
 import time
 from pathlib import Path
 
 import cv2
 from ultralytics import YOLO
-
 
 # ============================================================
 # CONFIGURATION
@@ -18,69 +16,39 @@ MODEL_NAME = "yolo26n-pose.pt"
 IMAGE_SIZE = 640
 CONFIDENCE_THRESHOLD = 0.25
 
-
-# COCO 17 keypoint names
-KEYPOINT_NAMES = [
-    "nose",
-    "left_eye",
-    "right_eye",
-    "left_ear",
-    "right_ear",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-    "left_wrist",
-    "right_wrist",
-    "left_hip",
-    "right_hip",
-    "left_knee",
-    "right_knee",
-    "left_ankle",
-    "right_ankle",
-]
+SUPPORTED_FORMATS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp"
+}
 
 
-def find_default_image():
-    """Find the first supported image in the images directory."""
+# ============================================================
+# IMAGE DISCOVERY
+# ============================================================
 
-    extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+def get_images():
+    """Find supported images in the input directory."""
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if not IMAGE_DIR.exists():
-        return None
-
-    images = sorted(
+    return sorted(
         path for path in IMAGE_DIR.iterdir()
-        if path.is_file() and path.suffix.lower() in extensions
+        if path.is_file()
+        and path.suffix.lower() in SUPPORTED_FORMATS
     )
 
-    return images[0] if images else None
 
+# ============================================================
+# POSE ESTIMATION
+# ============================================================
 
 def process_image(image_path, model):
-    """Detect people and estimate their body keypoints."""
+    """Run pose estimation and save the annotated image."""
 
-    print("\n" + "=" * 55)
-    print("HUMAN POSE ESTIMATION")
-    print("=" * 55)
-
-    if not image_path.exists():
-        print(f"ERROR: Image not found: {image_path}")
-        return
-
-    # Load the original image
     image = cv2.imread(str(image_path))
 
     if image is None:
-        print(f"ERROR: Could not read image: {image_path}")
-        return
+        print(f"[ERROR] Cannot read image: {image_path.name}")
+        return None
 
-    height, width = image.shape[:2]
-
-    print(f"Input image: {image_path.name}")
-    print(f"Image resolution: {width} x {height}")
-
-    # Run pose estimation
     start_time = time.perf_counter()
 
     results = model.predict(
@@ -90,125 +58,134 @@ def process_image(image_path, model):
         verbose=False,
     )
 
-    elapsed_time = time.perf_counter() - start_time
+    inference_time = time.perf_counter() - start_time
 
     result = results[0]
 
-    # Draw bounding boxes, keypoints, and skeletons
+    # Draw bounding boxes, keypoints, and skeletons.
     annotated_image = result.plot(
         boxes=True,
         labels=True,
         conf=True,
     )
 
-    # Create output directory
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Save annotated image
     output_path = OUTPUT_DIR / f"{image_path.stem}_pose.jpg"
 
-    success = cv2.imwrite(str(output_path), annotated_image)
+    if not cv2.imwrite(str(output_path), annotated_image):
+        print(f"[ERROR] Could not save: {output_path.name}")
+        return None
 
-    if not success:
-        print("ERROR: Could not save the output image.")
-        return
-
-    # Count detected people
     person_count = (
-        len(result.keypoints)
-        if result.keypoints is not None
-        else 0
+        0 if result.keypoints is None
+        else len(result.keypoints)
     )
 
-    print("\nRESULTS")
-    print("-" * 55)
+    print(f"\nImage: {image_path.name}")
     print(f"People detected: {person_count}")
-    print(f"Total inference time: {elapsed_time:.3f} seconds")
+    print(f"Inference time: {inference_time * 1000:.2f} ms")
+    print(f"Saved to: {output_path}")
 
-    if elapsed_time > 0:
-        print(f"Processing speed: {1 / elapsed_time:.2f} images/second")
+    return {
+        "image": image_path.name,
+        "people": person_count,
+        "inference_time": inference_time,
+    }
 
-    # Print keypoint information for every detected person
-    if result.keypoints is not None:
-        for person_index, keypoints in enumerate(
-            result.keypoints.data
-        ):
-            print(f"\nPerson {person_index + 1}")
-            print("-" * 35)
 
-            points = keypoints.cpu().numpy()
+# ============================================================
+# BENCHMARK
+# ============================================================
 
-            for index, point in enumerate(points):
-                x = float(point[0])
-                y = float(point[1])
+def print_benchmark(results, total_processing_time):
+    """Display aggregate performance measurements."""
 
-                # Depending on the model output, the third value
-                # may be a confidence score rather than a human-
-                # annotated visibility label.
-                confidence = (
-                    float(point[2])
-                    if len(point) > 2
-                    else None
-                )
+    if not results:
+        print("\nNo images were processed successfully.")
+        return
 
-                if confidence is not None:
-                    print(
-                        f"{KEYPOINT_NAMES[index]:<16} "
-                        f"x={x:7.1f}, y={y:7.1f}, "
-                        f"confidence={confidence:.3f}"
-                    )
-                else:
-                    print(
-                        f"{KEYPOINT_NAMES[index]:<16} "
-                        f"x={x:7.1f}, y={y:7.1f}"
-                    )
+    successful_images = len(results)
+
+    total_inference_time = sum(
+        item["inference_time"] for item in results
+    )
+
+    average_inference_time = (
+        total_inference_time / successful_images
+    )
+
+    total_people = sum(
+        item["people"] for item in results
+    )
+
+    throughput = (
+        successful_images / total_processing_time
+        if total_processing_time > 0 else 0
+    )
 
     print("\n" + "=" * 55)
-    print("Processing completed successfully!")
-    print(f"Annotated image saved to:\n{output_path}")
+    print("PERFORMANCE BENCHMARK")
     print("=" * 55)
 
-    # Display the result in a window
-    cv2.imshow("Human Pose Estimation", annotated_image)
+    print(f"Images processed:       {successful_images}")
+    print(f"People detected:        {total_people}")
+    print(f"Total inference time:   {total_inference_time:.3f} s")
+    print(
+        f"Average inference:      "
+        f"{average_inference_time * 1000:.2f} ms/image"
+    )
+    print(f"Total processing time:  {total_processing_time:.3f} s")
+    print(f"Processing throughput:  {throughput:.2f} images/s")
 
-    print("\nPress any key while the image window is active to close it.")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    print("=" * 55)
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Human Pose Estimation using YOLO and OpenCV"
-    )
+    print("=" * 55)
+    print("HUMAN POSE ESTIMATION")
+    print("=" * 55)
 
-    parser.add_argument(
-        "--image",
-        type=str,
-        default=None,
-        help="Path to the input image",
-    )
+    images = get_images()
 
-    args = parser.parse_args()
-
-    # Select input image
-    if args.image:
-        image_path = Path(args.image).expanduser().resolve()
-    else:
-        image_path = find_default_image()
-
-    if image_path is None:
-        print("No image found in the images directory.")
-        print(f"Please add an image to: {IMAGE_DIR}")
-        print("Alternatively, use: python main.py --image /path/to/image.jpg")
+    if not images:
+        print(f"No images found in: {IMAGE_DIR}")
+        print("Add some photos to the images directory.")
         return
 
-    # Load pretrained model
-    print(f"Loading model: {MODEL_NAME}")
-    print("The model will download automatically if necessary.")
+    print(f"Images found: {len(images)}")
+    print(f"Model: {MODEL_NAME}")
+    print(f"Image size: {IMAGE_SIZE}")
+    print(f"Confidence threshold: {CONFIDENCE_THRESHOLD}")
+
+    print("\nLoading model...")
 
     model = YOLO(MODEL_NAME)
 
-    process_image(image_path, model)
+    results = []
+
+    # Measure the complete processing loop, excluding model loading.
+    processing_start = time.perf_counter()
+
+    for index, image_path in enumerate(images, start=1):
+        print(f"\n[{index}/{len(images)}] Processing...")
+
+        result = process_image(image_path, model)
+
+        if result is not None:
+            results.append(result)
+
+    total_processing_time = (
+        time.perf_counter() - processing_start
+    )
+
+    print_benchmark(results, total_processing_time)
+
+    print(f"\nOutput directory: {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
